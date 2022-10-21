@@ -19,6 +19,10 @@ Multivariate Adaptive Regression Splines (mars), from the `earth` package, allow
 
 Through a data simulation, I demonstrate how to fit gam and scam models using the `mgcv` and `scam` packages. Then I approximate the scam model and provide an Excel-friendly regression equation. Reader should be aware that MARS does *not guarantee* monotonicity. Therefore, after fitting an approximation of the scam model, reader should test the predictions by feeding extreme values of the predictors into the final model.
 
+We also explore the `scar` package which uses monotonic binning. Then I approximate the scar model with non-linear least squares and sigmoid functions. Sigmoid functions guarantee monotonicity. However, sigmoid functions assume that the response tapers off on the tails (i.e., the relationship is S-shaped).
+
+Approximations are achieved by turning the logistic regression problem into a least squares problem. The trick is to use a pseudo response that is continuous (rather than binary).
+
 # Data Generating Process (DGP)
 
 The chunk generates 3 data frames: full data, training data, and test data. To demonstrate the wiggliness associated with gam, the sample size of the training data is limited to only 2000 observations.
@@ -36,6 +40,8 @@ library(MLmetrics)
 library(earth)
 library(plotmo)
 library(furrr)
+library(scar)
+library(minpack.lm)
 
 plan(multisession, workers = 6) # set to 2 for most PCs
 
@@ -361,8 +367,155 @@ summary(mod_earth)
 plotmo(mod_earth, type="link", caption="MARS with Training Data")
 ```
 
+# Alternative to SCAM: SCAR
+
+Models developed in `scam` return smooth relationships between a response and each predictor. However, the smoothness (and monotonicity) is achieved through the p-spline basis, which is difficult to implement. If smoothness is not required, an alternative approach is to use monotonic step functions to approximate the relationships. The `scar` package achieves this goal.
+
+Unfortunately, the `scar` package does not take data frames. I wrote two helper functions to convert a data frame into a matrix, which is then passed to the scar function.
+
+```{r}
+fit_scar <- function(formula, shape=rep("l", d), data, family=gaussian(),
+                     weights=rep(1, length(y)), epsilon = 1e-08){
+  
+  x <- model.matrix(formula, data)[,-1]
+  
+  y <- data[,all.vars(formula)[1]]
+  
+  mod <- scar(x, y, shape, family, weights, epsilon)
+  
+  mod$formula <- formula
+  
+  return(mod)
+}
+
+predict_scar <- function(object, newdata, type = c("link", "response"), rule=1, ...){
+  
+  fmla <- object$formula
+  
+  pred_names <- all.vars(fmla)[-1]
+  
+  x <- as.matrix(newdata[,pred_names])
+  
+  preds <- predict(object, x, type, rule, ...)
+  
+  return(preds)
+}
+```
+
+Now we can fit a scar model with monotonic binning.
+
+```{r}
+mod_scar <- fit_scar(y ~ x1 + x2, shape=c("in", "de"), data=train_data, family=binomial())
+```
+
+Inside `mod_scar` is an object called `componentfit`. It contains partial fitted values by predictor (column) and observation (row). Each observation in the training set corresponds to a row in `componentfit`. The fitted value for a single observation is the row sum of the partial fitted values.
+
+Given a pair of new predictor values (that are not in the training data), the `predict` function interpolates the partial fitted values from `componentfit`. This may be problematic if `componentfit` is very big. A similar problem arises with generating predictions from k-nearest-neighbors (knn).
+
+The interpolation of partial fitted values causes the relationship between a response and a predictor to appear "step-like".
+
+Check the partial plots.
+
+```{r}
+df_x1$log_odds <- predict_scar(mod_scar, newdata=df_x1)
+  
+df_x2$log_odds <- predict_scar(mod_scar, newdata=df_x2)
+
+ggplot(df_x1, aes(x=x1, y=log_odds)) + geom_line()
+ggplot(df_x2, aes(x=x2, y=log_odds)) + geom_line()
+```
+
+# Check test set performance
+
+```{r}
+preds_scar <- predict_scar(mod_scar, newdata=test_data, type="response")
+
+map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo=preds_pseudo, scar=preds_scar), function(x){
+  caTools::colAUC(x, test_data$y)
+}) %>% 
+  pivot_longer(everything(), names_to="model", values_to="ROC-AUC") %>% 
+  knitr::kable()
+
+map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo=preds_pseudo, scar=preds_scar), function(x){
+  MLmetrics::LogLoss(x, test_data$y)
+}) %>% 
+  pivot_longer(everything(), names_to="model", values_to="Log Loss") %>% 
+  knitr::kable()
+```
+
+# Approximating SCAR
+
+Similar to the MARS approximation of scam, we could approximate scar with another method (with the help of pseudo data). The pseudo response would be the log-odds from the scar model. The features would be sigmoid functions that are fed into non-linear least squares. Sigmoid functions guarantee monotonicity.
+
+First, some pseudo data!
+
+```{r}
+pseudo_train_data_nls <- train_data 
+
+pseudo_train_data_nls$y <- predict_scar(mod_scar, newdata=train_data, type="link")
+
+summary(pseudo_train_data_nls)
+
+```
+Second, non-linear least squares and sigmoid features. The classical `nls` function is very sensitive to initial parameter guesses. I have never been successful in using it. I suggest using `nlsLM` from the `minpack.lm` package.
+
+```{r}
+mod_pseudo_scar <- nlsLM(y ~ constant + a * SSfpl(x1, A1, B1, xmid1, scal1) +
+                           b * SSfpl(x2, A2, B2, xmid2, scal2),
+                         data=pseudo_train_data_nls,
+                         start=list(constant=0, a=1, b=1,
+                                    A1=-1, B1=1, xmid1=0.5, scal1=0.5,
+                                    A2=-1, B2=1, xmid2=0.5, scal2=0.5))
+
+
+```
+
+```{r}
+est <- coef(mod_pseudo_scar)
+
+est_df <- data.frame(Estimate=est)
+
+knitr::kable(est_df)
+```
+
+Some plots.
+
+```{r}
+df_x1$log_odds <- predict(mod_pseudo_scar, newdata=df_x1)
+  
+df_x2$log_odds <- predict(mod_pseudo_scar, newdata=df_x2)
+
+ggplot(df_x1, aes(x=x1, y=log_odds)) + geom_line()
+ggplot(df_x2, aes(x=x2, y=log_odds)) + geom_line()
+
+```
+
+Test set performance
+
+```{r}
+preds_pseudo_scar <- boot::inv.logit(predict(mod_pseudo_scar, newdata=test_data))
+
+map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo=preds_pseudo,
+             scar=preds_scar, pseudo_scar=preds_pseudo_scar), function(x){
+  caTools::colAUC(x, test_data$y)
+}) %>% 
+  pivot_longer(everything(), names_to="model", values_to="ROC-AUC") %>% 
+  knitr::kable()
+
+map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo=preds_pseudo,
+             scar=preds_scar, pseudo_scar=preds_pseudo_scar), function(x){
+  MLmetrics::LogLoss(x, test_data$y)
+}) %>% 
+  pivot_longer(everything(), names_to="model", values_to="Log Loss") %>% 
+  knitr::kable()
+```
+
+The approximation of scar actually outperforms the original scar model because the approximation extrapolates using the sigmoid functions that were estimated by non-linear least squares.
+
+Sigmoid functions guarantee monotonicity.
+
 # Conclusion
 
 Imposing shape constraints on data with high noise to signal ratios could greatly reduce variance (wiggliness). The `scam` package is highly effective in developing models with user-defined monotonicity constraints for each predictor. MARS can approximate the scam model with linear basis functions, which are easy to write down on paper and implement in an Excel formula.
 
-
+The `scar` package also develops models with user-defined monotonicity constraints for each predictor. Non-linear least squares can approximate the scar model with sigmoid functions, which are easy to write down on paper (`?SSfpl` for equation) and implement in an Excel formula.
