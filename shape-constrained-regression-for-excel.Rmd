@@ -42,6 +42,7 @@ library(plotmo)
 library(furrr)
 library(scar)
 library(minpack.lm)
+library(car)
 
 plan(multisession, workers = 6) # set to 2 for most PCs
 
@@ -185,13 +186,13 @@ Since the pseudo model is in the log-odds scale, I need to convert the predictio
 
 preds_pseudo <- boot::inv.logit(predict(mod_logit_pseudo, newdata=test_data))
 
-map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo=preds_pseudo), function(x){
+map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo), function(x){
   caTools::colAUC(x, test_data$y)
 }) %>% 
   pivot_longer(everything(), names_to="model", values_to="ROC-AUC") %>% 
   knitr::kable()
 
-map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo=preds_pseudo), function(x){
+map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo), function(x){
   MLmetrics::LogLoss(x, test_data$y)
 }) %>% 
   pivot_longer(everything(), names_to="model", values_to="Log Loss") %>% 
@@ -388,7 +389,8 @@ fit_scar <- function(formula, shape=rep("l", d), data, family=gaussian(),
   return(mod)
 }
 
-predict_scar <- function(object, newdata, type = c("link", "response"), rule=1, ...){
+predict_scar <- function(object, newdata, type = c("link", "response"),
+                         rule=1, ...){
   
   fmla <- object$formula
   
@@ -405,7 +407,8 @@ predict_scar <- function(object, newdata, type = c("link", "response"), rule=1, 
 Now we can fit a scar model with monotonic binning.
 
 ```{r}
-mod_scar <- fit_scar(y ~ x1 + x2, shape=c("in", "de"), data=train_data, family=binomial())
+mod_scar <- fit_scar(y ~ x1 + x2, shape=c("in", "de"), 
+                     data=train_data, family=binomial())
 ```
 
 Inside `mod_scar` is an object called `componentfit`. It contains partial fitted values by predictor (column) and observation (row). Each observation in the training set corresponds to a row in `componentfit`. The fitted value for a single observation is the row sum of the partial fitted values.
@@ -430,13 +433,15 @@ ggplot(df_x2, aes(x=x2, y=log_odds)) + geom_line()
 ```{r}
 preds_scar <- predict_scar(mod_scar, newdata=test_data, type="response")
 
-map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo=preds_pseudo, scar=preds_scar), function(x){
+map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo,
+             scar=preds_scar), function(x){
   caTools::colAUC(x, test_data$y)
 }) %>% 
   pivot_longer(everything(), names_to="model", values_to="ROC-AUC") %>% 
   knitr::kable()
 
-map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo=preds_pseudo, scar=preds_scar), function(x){
+map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo,
+             scar=preds_scar), function(x){
   MLmetrics::LogLoss(x, test_data$y)
 }) %>% 
   pivot_longer(everything(), names_to="model", values_to="Log Loss") %>% 
@@ -452,7 +457,8 @@ First, some pseudo data!
 ```{r}
 pseudo_train_data_nls <- train_data 
 
-pseudo_train_data_nls$y <- predict_scar(mod_scar, newdata=train_data, type="link")
+pseudo_train_data_nls$y <- predict_scar(mod_scar, newdata=train_data
+                                        , type="link")
 
 summary(pseudo_train_data_nls)
 
@@ -478,6 +484,25 @@ est_df <- data.frame(Estimate=est)
 knitr::kable(est_df)
 ```
 
+We could also bootstrap 95% confidence intervals for each estimate.
+
+```{r}
+boot_psuedo <- Boot(mod_pseudo_scar, R=1000)
+
+```
+
+```{r}
+
+CI_nls <- data.frame(confint(boot_psuedo, type="perc"))
+
+names(CI_nls) <- c("p2.5", "p97.5")
+
+CI_nls$signif <- (CI_nls$p2.5 * CI_nls$p97.5) > 0
+
+knitr::kable(CI_nls)
+```
+
+
 Some plots.
 
 ```{r}
@@ -495,14 +520,14 @@ Test set performance
 ```{r}
 preds_pseudo_scar <- boot::inv.logit(predict(mod_pseudo_scar, newdata=test_data))
 
-map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo=preds_pseudo,
+map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo,
              scar=preds_scar, pseudo_scar=preds_pseudo_scar), function(x){
   caTools::colAUC(x, test_data$y)
 }) %>% 
   pivot_longer(everything(), names_to="model", values_to="ROC-AUC") %>% 
   knitr::kable()
 
-map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo=preds_pseudo,
+map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo,
              scar=preds_scar, pseudo_scar=preds_pseudo_scar), function(x){
   MLmetrics::LogLoss(x, test_data$y)
 }) %>% 
