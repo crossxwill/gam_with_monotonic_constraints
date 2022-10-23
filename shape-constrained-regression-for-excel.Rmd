@@ -110,9 +110,26 @@ summary(mod_mono_gam)
 plot(mod_mono_gam, pages=1, se=FALSE, main="Constrained GAM",
      shift=coef(mod_mono_gam)[1])
 
+```
+
+```{r}
+## helper function for test set performance
+
+perf <- function(lst_preds, f_metric=caTools::colAUC, metricname="ROC-AUC"){
+  map_dfr(lst_preds, function(x){
+  f_metric(x, test_data$y)
+}) %>% 
+  pivot_longer(everything(), names_to="model", values_to=metricname) %>% 
+  knitr::kable()
+}
+```
+
+```{r}
+
 map_dfr(list(mod_gam=mod_gam, mod_mono_gam=mod_mono_gam), AIC) %>% 
   pivot_longer(everything(), names_to="model", values_to="AIC") %>% 
   knitr::kable()
+
 
 ## test set performance
 
@@ -120,19 +137,14 @@ preds_gam <- predict(mod_gam, newdata=test_data, type="response")
 preds_mono_gam <- predict(mod_mono_gam, newdata=test_data,
                           type="response")
 
-map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam), function(x){
-  caTools::colAUC(x, test_data$y)
-}) %>% 
-  pivot_longer(everything(), names_to="model", values_to="ROC-AUC") %>% 
-  knitr::kable()
+myPreds <- list(gam=preds_gam, mono_gam=preds_mono_gam)
 
-map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam), function(x){
-  MLmetrics::LogLoss(x, test_data$y) }) %>% 
-  pivot_longer(everything(), names_to="model", values_to="Log Loss") %>% 
-  knitr::kable()
+perf(myPreds, caTools::colAUC, "ROC-AUC")
 
+perf(myPreds, MLmetrics::LogLoss, "LogLoss")
 
 ```
+
 
 
 # Generate Pseudo-Training Data
@@ -186,17 +198,11 @@ Since the pseudo model is in the log-odds scale, I need to convert the predictio
 
 preds_pseudo <- boot::inv.logit(predict(mod_logit_pseudo, newdata=test_data))
 
-map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo), function(x){
-  caTools::colAUC(x, test_data$y)
-}) %>% 
-  pivot_longer(everything(), names_to="model", values_to="ROC-AUC") %>% 
-  knitr::kable()
+myPreds <- list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo)
 
-map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo), function(x){
-  MLmetrics::LogLoss(x, test_data$y)
-}) %>% 
-  pivot_longer(everything(), names_to="model", values_to="Log Loss") %>% 
-  knitr::kable()
+perf(myPreds, caTools::colAUC, "ROC-AUC")
+
+perf(myPreds, MLmetrics::LogLoss, "LogLoss")
 ```
 
 
@@ -264,9 +270,9 @@ mono_check(df_x1$log_odds)
 
 mono_check(df_x2$log_odds, FALSE)
 
-ggplot(df_x1, aes(x=x1, y=log_odds)) + geom_line()
+ggplot(df_x1, aes(x=x1, y=log_odds)) + geom_line() + theme_bw()
 
-ggplot(df_x2, aes(x=x2, y=log_odds)) + geom_line()
+ggplot(df_x2, aes(x=x2, y=log_odds)) + geom_line() + theme_bw()
 ```
 
 # How often does monotonicity fail?
@@ -424,8 +430,8 @@ df_x1$log_odds <- predict_scar(mod_scar, newdata=df_x1)
   
 df_x2$log_odds <- predict_scar(mod_scar, newdata=df_x2)
 
-ggplot(df_x1, aes(x=x1, y=log_odds)) + geom_line()
-ggplot(df_x2, aes(x=x2, y=log_odds)) + geom_line()
+ggplot(df_x1, aes(x=x1, y=log_odds)) + geom_line() + theme_bw()
+ggplot(df_x2, aes(x=x2, y=log_odds)) + geom_line() + theme_bw()
 ```
 
 # Check test set performance
@@ -433,19 +439,12 @@ ggplot(df_x2, aes(x=x2, y=log_odds)) + geom_line()
 ```{r}
 preds_scar <- predict_scar(mod_scar, newdata=test_data, type="response")
 
-map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo,
-             scar=preds_scar), function(x){
-  caTools::colAUC(x, test_data$y)
-}) %>% 
-  pivot_longer(everything(), names_to="model", values_to="ROC-AUC") %>% 
-  knitr::kable()
+myPreds <- list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo,
+             scar=preds_scar)
 
-map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo,
-             scar=preds_scar), function(x){
-  MLmetrics::LogLoss(x, test_data$y)
-}) %>% 
-  pivot_longer(everything(), names_to="model", values_to="Log Loss") %>% 
-  knitr::kable()
+perf(myPreds, caTools::colAUC, "ROC-AUC")
+
+perf(myPreds, MLmetrics::LogLoss, "Log Loss")
 ```
 
 # Approximating SCAR
@@ -510,8 +509,8 @@ df_x1$log_odds <- predict(mod_pseudo_scar, newdata=df_x1)
   
 df_x2$log_odds <- predict(mod_pseudo_scar, newdata=df_x2)
 
-ggplot(df_x1, aes(x=x1, y=log_odds)) + geom_line()
-ggplot(df_x2, aes(x=x2, y=log_odds)) + geom_line()
+ggplot(df_x1, aes(x=x1, y=log_odds)) + geom_line() + theme_bw()
+ggplot(df_x2, aes(x=x2, y=log_odds)) + geom_line() + theme_bw()
 
 ```
 
@@ -520,19 +519,12 @@ Test set performance
 ```{r}
 preds_pseudo_scar <- boot::inv.logit(predict(mod_pseudo_scar, newdata=test_data))
 
-map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo,
-             scar=preds_scar, pseudo_scar=preds_pseudo_scar), function(x){
-  caTools::colAUC(x, test_data$y)
-}) %>% 
-  pivot_longer(everything(), names_to="model", values_to="ROC-AUC") %>% 
-  knitr::kable()
+myPreds <- list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo,
+             scar=preds_scar, pseudo_scar=preds_pseudo_scar)
 
-map_dfr(list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo,
-             scar=preds_scar, pseudo_scar=preds_pseudo_scar), function(x){
-  MLmetrics::LogLoss(x, test_data$y)
-}) %>% 
-  pivot_longer(everything(), names_to="model", values_to="Log Loss") %>% 
-  knitr::kable()
+perf(myPreds, caTools::colAUC, "ROC-AUC")
+
+perf(myPreds, MLmetrics::LogLoss, "Log Loss")
 ```
 
 The approximation of scar actually outperforms the original scar model because the approximation extrapolates using the sigmoid functions that were estimated by non-linear least squares.
