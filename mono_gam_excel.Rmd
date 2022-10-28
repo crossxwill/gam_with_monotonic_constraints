@@ -7,6 +7,8 @@ output: pdf_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+
 ```
 
 # Summary
@@ -43,6 +45,7 @@ library(furrr)
 library(scar)
 library(minpack.lm)
 library(car)
+library(cgam)
 
 plan(multisession, workers = 6) # set to 2 for most PCs
 
@@ -52,15 +55,18 @@ nobs <- 100000
 
 x1 <- rnorm(nobs)
 x2 <- rnorm(nobs)
+x3 <- sample(c('A', 'B', 'C', 'D'), size=nobs, replace=TRUE,
+             prob = c(0.8, 0.1, 0.05, 0.05))
 
 # Population log odds is a function of sigmoid features
 
 z <- -35 + 5 * SSfpl(x1, -2, 2, 0, 0.5) - 5 * SSfpl(x2, -1, 1, 0, 0.1) +
+         + 5 * I(x3=='B') + 10 * I(x3=='C') + 10 * I(x3=='D') +
   rnorm(nobs,0,20)
 
 y <- rbinom(nobs, 1, prob=boot::inv.logit(z))
 
-full_data <- data.frame(y=y, x1=x1, x2=x2)
+full_data <- data.frame(y=y, x1=x1, x2=x2, x3=as.factor(x3))
 
 summary(full_data)
 
@@ -81,12 +87,12 @@ Due to the high noise to signal ratio in the training data, gam estimates very w
 ## when population error is high, gam returns non-monotonic relationships
 ## even when the population relationships are monotonic
 
-mod_gam <- gam(y ~ s(x1) + s(x2), data = train_data, family = binomial)
+mod_gam <- gam(y ~ s(x1) + s(x2) + x3, data = train_data, family = binomial)
 
 summary(mod_gam)
 
 plot(mod_gam, pages=1, se=FALSE, main="Unconstrained GAM",
-     shift=coef(mod_gam)[1])
+     shift=coef(mod_gam)[1], all.terms=TRUE)
 
 ```
 
@@ -102,13 +108,13 @@ Shape constraints on each predictor reduce variance (wiggliness). Out-of-sample 
 ## mpi = monotonic p-spline increasing
 ## mpd = monotonic p-spline decreasing
 
-mod_mono_gam <- scam(y ~ s(x1, bs="mpi") + s(x2, bs="mpd"),
+mod_mono_gam <- scam(y ~ s(x1, bs="mpi") + s(x2, bs="mpd") + x3,
                      data = train_data, family = binomial)
 
 summary(mod_mono_gam)
 
 plot(mod_mono_gam, pages=1, se=FALSE, main="Constrained GAM",
-     shift=coef(mod_mono_gam)[1])
+     shift=coef(mod_mono_gam)[1], all.terms=TRUE)
 
 ```
 
@@ -182,7 +188,7 @@ summary(pseudo_train_data)
 ## reLU (rectified linear unit)
 
 
-mod_logit_pseudo <- earth(y ~ x1 + x2, data=pseudo_train_data)
+mod_logit_pseudo <- earth(y ~ x1 + x2 + x3, data=pseudo_train_data)
 
 summary(mod_logit_pseudo)
 
@@ -224,6 +230,7 @@ as.func <- function(object, digits = 20, use.names = TRUE, ...)
     "function(x){\n",
     "if(is.vector(x))\n",
     "  x <- matrix(x, nrow = 1, ncol = length(x))\n",
+    "x <- model.matrix(delete.response(object$terms),x) \n",
     "with(as.data.frame(x),\n",
     format(object, digits = digits, use.names = use.names, style = "pmax", ...),
     ")\n",
@@ -232,7 +239,8 @@ as.func <- function(object, digits = 20, use.names = TRUE, ...)
 score_function <- as.func(mod_logit_pseudo)
 
 compare_df <- expand.grid(x1 = seq(-10, 10, 0.1),
-           x2 = seq(-10, 10, 0.1))
+           x2 = seq(-10, 10, 0.1),
+           x3 = factor(c('A', 'B', 'C', 'D')))
 
 earth_preds <- predict(mod_logit_pseudo, newdata=compare_df)
 
@@ -257,10 +265,14 @@ mono_check <- function(x, increasing=TRUE){
 }
 
 df_x1 <- data.frame(x1 = seq(-10,10, 0.1),
-                    x2 = mean(train_data$x2))
+                    x2 = mean(train_data$x2),
+                    x3 = factor('A', levels=c('A','B','C','D'))
+                    )
 
 df_x2 <- data.frame(x1 = mean(train_data$x1),
-                    x2 = seq(-10,10, 0.1))
+                    x2 = seq(-10,10, 0.1),
+                    x3 = factor('A', levels=c('A','B','C','D'))
+                    )
 
 df_x1$log_odds <- score_function(df_x1)
 
@@ -297,14 +309,19 @@ simulate_one <- function(myseed){
   
   x1 <- rnorm(nobs)
   x2 <- rnorm(nobs)
+  x3 <- sample(c('A', 'B', 'C', 'D'), size=nobs, replace=TRUE,
+               prob = c(0.8, 0.1, 0.05, 0.05))
+  
+  # Population log odds is a function of sigmoid features
   
   z <- -35 + 5 * SSfpl(x1, -2, 2, 0, 0.5) - 5 * SSfpl(x2, -1, 1, 0, 0.1) +
+           + 5 * I(x3=='B') + 10 * I(x3=='C') + 10 * I(x3=='D') +
     rnorm(nobs,0,20)
   
   y <- rbinom(nobs, 1, prob=boot::inv.logit(z))
   
   # Generate full, train, and test sets
-  full_data <- data.frame(y=y, x1=x1, x2=x2)
+  full_data <- data.frame(y=y, x1=x1, x2=x2, x3=as.factor(x3))
   
   train_index <- sample.split(full_data$y, SplitRatio = 2/100)
   train_data <- full_data[train_index,] # small
@@ -312,7 +329,7 @@ simulate_one <- function(myseed){
   
   # SCAM
   
-  my_mod_mono_gam <- scam(y ~ s(x1, bs="mpi") + s(x2, bs="mpd"),
+  my_mod_mono_gam <- scam(y ~ s(x1, bs="mpi") + s(x2, bs="mpd") + x3,
                        data = train_data, family = binomial)
   
   # Pseudo data
@@ -325,17 +342,21 @@ simulate_one <- function(myseed){
   
   # MARS
   
-  my_mod_pseudo_mars <- earth(y ~ x1 + x2, data=pseudo_train_data)
+  my_mod_pseudo_mars <- earth(y ~ x1 + x2 + x3, data=pseudo_train_data)
   
   
   # Check shape constraints
   
   df_x1 <- data.frame(x1 = seq(-10,10, 0.1),
-                      x2 = mean(train_data$x2))
+                      x2 = mean(train_data$x2),
+                      x3 = factor('A', levels=c('A','B','C','D'))
+                      )
   
   df_x2 <- data.frame(x1 = mean(train_data$x1),
-                      x2 = seq(-10,10, 0.1))
-  
+                      x2 = seq(-10,10, 0.1),
+                      x3 = factor('A', levels=c('A','B','C','D'))
+                      )
+    
   df_x1$log_odds <- predict(my_mod_pseudo_mars, newdata=df_x1)
   
   df_x2$log_odds <- predict(my_mod_pseudo_mars, newdata=df_x2)
@@ -345,7 +366,7 @@ simulate_one <- function(myseed){
   return(success)
 }
 
-mono_success <- future_map_int(1:60, simulate_one,
+mono_success <- future_map_int(61:120, simulate_one,
                          .options=furrr_options(seed=NULL,
                                                 packages=c('earth', 'scam')
                                                 )
@@ -367,7 +388,7 @@ The pseudo data filters out the noise in the latent response (`z`), which drives
 Reader should notice that `y` in the actual training data is a binary outcome.
 
 ```{r}
-mod_earth <- earth(y ~ x1 + x2, data=train_data, glm=list(family=binomial))
+mod_earth <- earth(y ~ x1 + x2 + x3, data=train_data, glm=list(family=binomial))
 
 summary(mod_earth)
 
@@ -398,11 +419,11 @@ fit_scar <- function(formula, shape=rep("l", d), data, family=gaussian(),
 predict_scar <- function(object, newdata, type = c("link", "response"),
                          rule=1, ...){
   
-  fmla <- object$formula
+  fmla <- delete.response(terms(object$formula))
   
-  pred_names <- all.vars(fmla)[-1]
+  # pred_names <- all.vars(fmla)[-1]
   
-  x <- as.matrix(newdata[,pred_names])
+  x <- model.matrix(fmla, newdata)[,-1]
   
   preds <- predict(object, x, type, rule, ...)
   
@@ -413,7 +434,7 @@ predict_scar <- function(object, newdata, type = c("link", "response"),
 Now we can fit a scar model with monotonic binning.
 
 ```{r}
-mod_scar <- fit_scar(y ~ x1 + x2, shape=c("in", "de"), 
+mod_scar <- fit_scar(y ~ x1 + x2 + x3, shape=c("in", "de", "l", "l", "l"), 
                      data=train_data, family=binomial())
 ```
 
@@ -466,9 +487,12 @@ Second, non-linear least squares and sigmoid features. The classical `nls` funct
 
 ```{r}
 mod_pseudo_scar <- nlsLM(y ~ constant + a * SSfpl(x1, A1, B1, xmid1, scal1) +
-                           b * SSfpl(x2, A2, B2, xmid2, scal2),
+                           b * SSfpl(x2, A2, B2, xmid2, scal2) +
+                           c * I(x3=='B') +
+                           d * I(x3=='C') +
+                           e * I(x3=='D'),
                          data=pseudo_train_data_nls,
-                         start=list(constant=0, a=1, b=1,
+                         start=list(constant=0, a=1, b=1, c=1, d=1, e=1,
                                     A1=-1, B1=1, xmid1=0.5, scal1=0.5,
                                     A2=-1, B2=1, xmid2=0.5, scal2=0.5))
 
@@ -486,7 +510,7 @@ knitr::kable(est_df)
 We could also bootstrap 95% confidence intervals for each estimate.
 
 ```{r}
-boot_psuedo <- Boot(mod_pseudo_scar, R=1000)
+boot_psuedo <- Boot(mod_pseudo_scar, R=1000, ncores=6)
 
 ```
 
@@ -530,6 +554,81 @@ perf(myPreds, MLmetrics::LogLoss, "Log Loss")
 The approximation of scar actually outperforms the original scar model because the approximation extrapolates using the sigmoid functions that were estimated by non-linear least squares.
 
 Sigmoid functions guarantee monotonicity.
+
+# CGAM
+
+SCAM and SCAR do not constrain the relationships between the response and categorical predictors. In our simulated data set, the effects of `C` and `D` should be similar. However, in our training data set, this does not appear to be the case. 
+
+An alternative to the `scam` package is `cgam`. One major draw back of this package is that the `predict` function does not allow for extrapolation. Our test data set requires us to extrapolate, so we will not be able to measure the test set performance of the CGAM model. In this particular case, we have no choice but to fit a pseudo model.
+
+First, we convert `x3` from factor to integer.
+
+```{r}
+train_data <- train_data %>% 
+  mutate(x3_num = case_when(x3=='A' ~ 0,
+                            x3=='B' ~ 1,
+                            x3=='C' ~ 2,
+                            TRUE ~ 3))
+
+```
+
+Second, fit a CGAM with a shape constraint on `x3_num`.
+
+```{r}
+mod_cgam <- cgam(y ~ s.incr(x1) + s.decr(x2) + incr(x3_num),
+                 data = train_data, family = "binomial")
+
+summary(mod_cgam)
+
+```
+
+Third, generate pseudo data.
+
+```{r}
+pseudo_train_data_cgam <- train_data
+
+pseudo_train_data_cgam$y <- as.numeric(predict(mod_cgam, newData=train_data,
+                                               interval="none",
+                                    type="link")$object$etahat)
+
+summary(pseudo_train_data_cgam)
+```
+Next, fit a MARS model on the pseudo data. The threshold was set to 0.01 to get monotonicity. Increasing this threshold raises bias but lowers variance.
+
+```{r}
+mod_pseudo_cgam <- earth(y ~ x1 + x2 + x3, data=pseudo_train_data_cgam,
+                         thresh=0.01)
+
+summary(mod_pseudo_cgam)
+
+plotmo(mod_pseudo_cgam, type="link", caption="MARS with CGAM Reponse",
+       extend=0.1)
+```
+Check monotonicity.
+
+```{r}
+df_x1$log_odds <- predict(mod_pseudo_cgam, newdata=df_x1)
+  
+df_x2$log_odds <- predict(mod_pseudo_cgam, newdata=df_x2)
+  
+success <- mono_check(df_x1$log_odds) & mono_check(df_x2$log_odds, FALSE)
+
+success
+```
+Finally, check test set performance.
+
+```{r}
+preds_pseudo_cgam <- boot::inv.logit(predict(mod_pseudo_cgam, newdata=test_data))
+
+myPreds <- list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo,
+             scar=preds_scar, pseudo_scar=preds_pseudo_scar, pseudo_cgam=preds_pseudo_cgam)
+
+perf(myPreds, caTools::colAUC, "ROC-AUC")
+
+perf(myPreds, MLmetrics::LogLoss, "Log Loss")
+```
+
+
 
 # Conclusion
 
