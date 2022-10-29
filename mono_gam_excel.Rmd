@@ -29,7 +29,7 @@ Approximations are achieved by turning the logistic regression problem into a le
 
 The chunk generates 3 data frames: full data, training data, and test data. To demonstrate the wiggliness associated with gam, the sample size of the training data is limited to only 2000 observations.
 
-Each data frame contains a binary response and two predictors. The first predictor has a monotonically increasing relationship with the response, while the second predictor has a monotonically decreasing relationship with the response. Both relationships are sigmoidal and hence highly non-linear.
+Each data frame contains a binary response, two continuous predictors, and one categorical predictor. The first predictor has a monotonically increasing relationship with the response, while the second predictor has a monotonically decreasing relationship with the response. Both relationships are sigmoidal and hence highly non-linear. The third predictor is categorical but has an ordinal relationship with the response.
 
 In addition, the event rate of the response is rare.
 
@@ -67,6 +67,8 @@ z <- -35 + 5 * SSfpl(x1, -2, 2, 0, 0.5) - 5 * SSfpl(x2, -1, 1, 0, 0.1) +
 y <- rbinom(nobs, 1, prob=boot::inv.logit(z))
 
 full_data <- data.frame(y=y, x1=x1, x2=x2, x3=as.factor(x3))
+
+
 
 summary(full_data)
 
@@ -177,15 +179,11 @@ summary(pseudo_train_data)
 
 # Approximate SCAM with MARS
 
+Unfortunately, both gam and scam models are very difficult to implement outside of R due to the p-spline basis. An alternative is to approximate the scam relationships
+with simpler basis functions like the linear basis (which can be easily implemented in Excel) -- the linear basis is also called the reLU (rectified linear unit).
+
 ```{r}
 ## approximate the Mono GAM model with MARS
-
-## unfortunately, both gam and scam models are very difficult to 
-## implement outside of R due to how the basis functions are defined.
-## an alternative is to approximate the scam relationships
-## with simpler basis functions like the linear basis (which can be 
-## easily implemented in Excel) -- the linear basis is also called the
-## reLU (rectified linear unit)
 
 
 mod_logit_pseudo <- earth(y ~ x1 + x2 + x3, data=pseudo_train_data)
@@ -372,7 +370,6 @@ mono_success <- future_map_int(61:120, simulate_one,
                                                 )
                          )
 
-future:::ClusterRegistry("stop")
 
 
 mean(mono_success)
@@ -635,3 +632,136 @@ perf(myPreds, MLmetrics::LogLoss, "Log Loss")
 Imposing shape constraints on data with high noise to signal ratios could greatly reduce variance (wiggliness). The `scam` package is highly effective in developing models with user-defined monotonicity constraints for each predictor. MARS can approximate the scam model with linear basis functions, which are easy to write down on paper and implement in an Excel formula.
 
 The `scar` package also develops models with user-defined monotonicity constraints for each predictor. Non-linear least squares can approximate the scar model with sigmoid functions, which are easy to write down on paper (`?SSfpl` for equation) and implement in an Excel formula.
+
+# Appendix: Many Earths
+
+The code below seeks to fit a MARS model to the original training data. An early attempt used the default arguments from `earth`. This attempt will tune based on `nk` and whether the montonicity constraints are met.
+
+```{r}
+fit_earth <- function(try_nk, glm_params=NULL, data_param=NULL){
+  my_mod_earth <- earth(y ~ x1 + x2 + x3, data=data_param,
+                        glm=glm_params,
+                        nk=try_nk, thresh=1e-8)
+  
+  aic <- my_mod_earth$glm.stats[,'dev'] +
+    log(nrow(data_param))*length(my_mod_earth$coefficients) # this is BIC
+  
+  df_x1 <- data.frame(x1 = seq(-10,10, 0.1),
+                      x2 = mean(train_data$x2),
+                      x3 = factor('A', levels=c('A','B','C','D'))
+                      )
+  
+  df_x2 <- data.frame(x1 = mean(train_data$x1),
+                      x2 = seq(-10,10, 0.1),
+                      x3 = factor('A', levels=c('A','B','C','D'))
+                      )
+    
+  df_x1$log_odds <- predict(my_mod_earth, newdata=df_x1)
+  
+  df_x2$log_odds <- predict(my_mod_earth, newdata=df_x2)
+  
+  mono <- mono_check(df_x1$log_odds) & mono_check(df_x2$log_odds, FALSE)
+  
+  out <- tibble(nk=try_nk,
+             model = lst(my_mod_earth),
+             mono = mono,
+             aic = aic)
+  
+  return(out)
+
+}
+```
+
+```{r, warning=FALSE}
+many_earths <- future_map_dfr(seq(2,200,1), fit_earth,
+                         .options=furrr_options(seed=NULL,
+                                                packages=c('earth')
+                                                ),
+                         glm_params=list(family=binomial),
+                         data_param=train_data
+                         )
+```
+
+```{r}
+many_earths %>% 
+  filter(mono == TRUE) %>% 
+  ggplot(., aes(x=nk, y=aic)) +
+  geom_line() + theme_bw()
+```
+
+```{r}
+optimal_nk <- many_earths %>% 
+  filter(mono == TRUE) %>% 
+  filter(aic == min(aic)) %>% 
+  arrange(nk) %>% 
+  slice(1)
+
+final_earth <- with(many_earths, model[nk==optimal_nk$nk])[[1]]
+
+summary(final_earth)
+
+plotmo(final_earth, type="link", caption="MARS with nk Tuning",
+       extend=0.1)
+```
+
+```{r}
+preds_optimal_earth <- predict(final_earth, newdata = test_data, type="response")
+
+myPreds <- list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo,
+             scar=preds_scar, pseudo_scar=preds_pseudo_scar, pseudo_cgam=preds_pseudo_cgam,
+             earth=preds_optimal_earth)
+
+perf(myPreds, caTools::colAUC, "ROC-AUC")
+
+perf(myPreds, MLmetrics::LogLoss, "Log Loss")
+```
+
+
+We can repeat the tuning with pseudo data.
+
+```{r, warning=FALSE}
+many_earths_pseudo <- future_map_dfr(seq(2,200,1), fit_earth,
+                         .options=furrr_options(seed=NULL,
+                                                packages=c('earth')
+                                                ),
+                         glm_params=list(family=gaussian),
+                         data_param=pseudo_train_data_cgam
+                         )
+```
+
+```{r}
+many_earths_pseudo %>% 
+  filter(mono == TRUE) %>% 
+  ggplot(., aes(x=nk, y=aic)) +
+  geom_line() + theme_bw()
+```
+
+```{r}
+optimal_nk_pseudo <- many_earths_pseudo %>% 
+  filter(mono == TRUE) %>% 
+  filter(aic == min(aic)) %>% 
+  arrange(nk) %>% 
+  slice(1)
+
+final_earth_pseudo <- with(many_earths_pseudo, model[nk==optimal_nk_pseudo$nk])[[1]]
+
+summary(final_earth_pseudo)
+
+plotmo(final_earth_pseudo, type="link", caption="MARS with nk Tuning & Pseudo Data",
+       extend=0.1)
+```
+
+```{r}
+preds_optimal_earth_pseudo <- boot::inv.logit(predict(final_earth_pseudo,
+                                            newdata = test_data))
+
+myPreds <- list(gam=preds_gam, mono_gam=preds_mono_gam, pseudo_mono=preds_pseudo,
+             scar=preds_scar, pseudo_scar=preds_pseudo_scar, pseudo_cgam=preds_pseudo_cgam,
+             earth=preds_optimal_earth,
+             pseudo_earth=preds_optimal_earth_pseudo)
+
+perf(myPreds, caTools::colAUC, "ROC-AUC")
+
+perf(myPreds, MLmetrics::LogLoss, "Log Loss")
+```
+
